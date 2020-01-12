@@ -109,6 +109,7 @@ namespace CodeWalker
 
         bool rendercollisionmeshes = Settings.Default.ShowCollisionMeshes;
         List<BoundsStoreItem> collisionitems = new List<BoundsStoreItem>();
+        List<YbnFile> collisionybns = new List<YbnFile>();
         int collisionmeshrange = Settings.Default.CollisionMeshRange;
         bool[] collisionmeshlayers = { true, true, true };
 
@@ -154,13 +155,13 @@ namespace CodeWalker
         MapSelection PrevMouseHit = new MapSelection();
 
         bool MouseRayCollisionEnabled = true;
-        bool MouseRayCollisionVisible = true;
+        bool MouseRayCollisionVisible = false;
         SpaceRayIntersectResult MouseRayCollision = new SpaceRayIntersectResult();
 
         string SelectionModeStr = "Entity";
         MapSelectionMode SelectionMode = MapSelectionMode.Entity;
         MapSelection SelectedItem;
-        List<MapSelection> SelectedItems = new List<MapSelection>();
+        MapSelection CopiedItem;
         WorldInfoForm InfoForm = null;
 
 
@@ -181,15 +182,6 @@ namespace CodeWalker
         WorldSnapMode SnapModePrev = WorldSnapMode.Ground;//also the default snap mode
         float SnapGridSize = 1.0f;
 
-        YmapEntityDef CopiedEntity = null;
-        YmapCarGen CopiedCarGen = null;
-        YndNode CopiedPathNode = null;
-        YnvPoly CopiedNavPoly = null;
-        YnvPoint CopiedNavPoint = null;
-        YnvPortal CopiedNavPortal = null;
-        TrainTrackNode CopiedTrainNode = null;
-        ScenarioNode CopiedScenarioNode = null;
-        AudioPlacement CopiedAudio = null;
 
         public bool EditEntityPivot { get; set; } = false;
 
@@ -197,6 +189,7 @@ namespace CodeWalker
 
         WorldSearchForm SearchForm = null;
 
+        CutsceneForm CutsceneForm = null;
 
         InputManager Input = new InputManager();
 
@@ -281,7 +274,7 @@ namespace CodeWalker
             LocatorMarker.IsMovable = true;
             //AddDefaultMarkers(); //some POI to start with
 
-            MetaName[] texsamplers = RenderableGeometry.GetTextureSamplerList();
+            ShaderParamNames[] texsamplers = RenderableGeometry.GetTextureSamplerList();
             foreach (var texsampler in texsamplers)
             {
                 TextureSamplerComboBox.Items.Add(texsampler);
@@ -397,6 +390,8 @@ namespace CodeWalker
 
             if (pauserendering) return;
 
+            GameFileCache.BeginFrame();
+
             if (!Monitor.TryEnter(Renderer.RenderSyncRoot, 50))
             { return; } //couldn't get a lock, try again next time
 
@@ -404,7 +399,10 @@ namespace CodeWalker
 
             space.Update(elapsed);
 
-
+            if (CutsceneForm != null)
+            {
+                CutsceneForm.UpdateAnimation(elapsed);
+            }
 
             Renderer.Update(elapsed, MouseLastPoint.X, MouseLastPoint.Y);
 
@@ -436,17 +434,17 @@ namespace CodeWalker
                 RenderSingleItem();
             }
 
-            UpdateMouseHitsFromRenderer();
+            UpdateMouseHits();
 
             RenderSelection();
+
+            RenderMoused();
 
             Renderer.RenderQueued();
 
             Renderer.RenderBounds(SelectionMode);
 
             Renderer.RenderSelectionGeometry(SelectionMode);
-
-            RenderMoused();
 
             Renderer.RenderFinalPass();
 
@@ -481,7 +479,7 @@ namespace CodeWalker
             float moveSpeed = 50.0f;
 
 
-            Input.Update(elapsed);
+            Input.Update();
 
             if (Input.xbenable)
             {
@@ -504,6 +502,19 @@ namespace CodeWalker
                 }
 
                 Vector3 movevec = Input.KeyboardMoveVec(MapViewEnabled);
+
+                if (Input.xbenable)
+                {
+                    movevec.X += Input.xblx;
+                    if (MapViewEnabled) movevec.Y += Input.xbly;
+                    else movevec.Z -= Input.xbly;
+                    moveSpeed *= (1.0f + (Math.Min(Math.Max(Input.xblt, 0.0f), 1.0f) * 15.0f)); //boost with left trigger
+                    if (Input.ControllerButtonPressed(GamepadButtonFlags.A | GamepadButtonFlags.RightShoulder | GamepadButtonFlags.LeftShoulder))
+                    {
+                        moveSpeed *= 5.0f;
+                    }
+                }
+
 
                 if (MapViewEnabled)
                 {
@@ -534,40 +545,23 @@ namespace CodeWalker
 
                 if (Input.xbenable)
                 {
-                    camera.ControllerRotate(Input.xblx + Input.xbrx, Input.xbly + Input.xbry);
+                    camera.ControllerRotate(Input.xbrx, Input.xbry, elapsed);
 
                     float zoom = 0.0f;
                     float zoomspd = s.XInputZoomSpeed;
                     float zoomamt = zoomspd * elapsed;
                     if (Input.ControllerButtonPressed(GamepadButtonFlags.DPadUp)) zoom += zoomamt;
                     if (Input.ControllerButtonPressed(GamepadButtonFlags.DPadDown)) zoom -= zoomamt;
+                    if (MapViewEnabled) zoom -= zoomamt * Input.xbry;
 
                     camera.ControllerZoom(zoom);
 
-                    float acc = 0.0f;
-                    float accspd = s.XInputMoveSpeed;//actually accel speed...
-                    acc += Input.xbrt * accspd;
-                    acc -= Input.xblt * accspd;
-
-                    Vector3 newdir = camera.ViewDirection; //maybe use the "vehicle" direction...?
-                    Input.xbcontrolvelocity += (acc * elapsed);
-
-                    if (Input.ControllerButtonPressed(GamepadButtonFlags.A | GamepadButtonFlags.RightShoulder)) //handbrake...
-                    {
-                        Input.xbcontrolvelocity *= Math.Max(0.75f - elapsed, 0);//not ideal for low fps...
-                        //Input.xbcontrolvelocity = 0.0f;
-                        if (Math.Abs(Input.xbcontrolvelocity) < 0.001f) Input.xbcontrolvelocity = 0.0f;
-                    }
-
-                    camEntity.Velocity = newdir * Input.xbcontrolvelocity;
-                    camEntity.Position += camEntity.Velocity * elapsed;
-
-
-                    //fire!
-                    if (Input.ControllerButtonJustPressed(GamepadButtonFlags.LeftShoulder))
+                    bool fire = (Input.xbtrigs.Y > 0);
+                    if (fire && !ControlFireToggle)
                     {
                         SpawnTestEntity(true);
                     }
+                    ControlFireToggle = fire;
 
                 }
 
@@ -603,7 +597,7 @@ namespace CodeWalker
 
                 if (Input.xbenable)
                 {
-                    camera.ControllerRotate(Input.xbrx, Input.xbry);
+                    camera.ControllerRotate(Input.xbrx, Input.xbry, elapsed);
                 }
 
 
@@ -624,6 +618,7 @@ namespace CodeWalker
                 Vector3 move = lftxy * movecontrol.X + fwdxy * movecontrol.Y;
                 Vector2 movexy = new Vector2(move.X, move.Y);
 
+                movexy *= (1.0f + (Math.Min(Math.Max(Input.xblt, 0.0f), 1.0f) * 15.0f)); //boost with left trigger
 
                 pedEntity.ControlMovement = movexy;
                 pedEntity.ControlJump = Input.kbjump || Input.ControllerButtonPressed(GamepadButtonFlags.X);
@@ -678,6 +673,10 @@ namespace CodeWalker
                 ProjectForm.GetVisibleYmaps(camera, renderworldVisibleYmapDict);
             }
 
+            if (CutsceneForm != null)
+            {
+                CutsceneForm.GetVisibleYmaps(camera, renderworldVisibleYmapDict);
+            }
 
             Renderer.RenderWorld(renderworldVisibleYmapDict, spaceEnts);
 
@@ -731,14 +730,23 @@ namespace CodeWalker
             collisionitems.Clear();
             space.GetVisibleBounds(camera, collisionmeshrange, collisionmeshlayers, collisionitems);
 
-            if (ProjectForm != null)
-            {
-                ProjectForm.GetVisibleCollisionMeshes(camera, collisionitems);
-            }
-
+            collisionybns.Clear();
             foreach (var item in collisionitems)
             {
                 YbnFile ybn = gameFileCache.GetYbn(item.Name);
+                if ((ybn != null) && (ybn.Loaded))
+                {
+                    collisionybns.Add(ybn);
+                }
+            }
+
+            if (ProjectForm != null)
+            {
+                ProjectForm.GetVisibleYbns(camera, collisionybns);
+            }
+
+            foreach (var ybn in collisionybns)
+            {
                 if ((ybn != null) && (ybn.Loaded))
                 {
                     Renderer.RenderCollisionMesh(ybn.Bounds, null);
@@ -1094,63 +1102,11 @@ namespace CodeWalker
             PrevMouseHit = LastMouseHit;
             LastMouseHit = CurMouseHit;
 
-            bool change = (LastMouseHit.EntityDef != PrevMouseHit.EntityDef);
+            bool change = LastMouseHit.CheckForChanges(PrevMouseHit); //(LastMouseHit.EntityDef != PrevMouseHit.EntityDef);
             if (SelectByGeometry)
             {
                 change = change || (LastMouseHit.Geometry != PrevMouseHit.Geometry);
             }
-            switch (SelectionMode)
-            {
-                case MapSelectionMode.EntityExtension:
-                    change = change || (LastMouseHit.EntityExtension != PrevMouseHit.EntityExtension);
-                    break;
-                case MapSelectionMode.ArchetypeExtension:
-                    change = change || (LastMouseHit.ArchetypeExtension != PrevMouseHit.ArchetypeExtension);
-                    break;
-                case MapSelectionMode.TimeCycleModifier:
-                    change = change || (LastMouseHit.TimeCycleModifier != PrevMouseHit.TimeCycleModifier);
-                    break;
-                case MapSelectionMode.CarGenerator:
-                    change = change || (LastMouseHit.CarGenerator != PrevMouseHit.CarGenerator);
-                    break;
-                case MapSelectionMode.MloInstance:
-                    change = change || (LastMouseHit.MloEntityDef != PrevMouseHit.MloEntityDef);
-                    break;
-                case MapSelectionMode.DistantLodLights:
-                    change = change || (LastMouseHit.DistantLodLights != PrevMouseHit.DistantLodLights);
-                    break;
-                case MapSelectionMode.Grass:
-                    change = change || (LastMouseHit.GrassBatch != PrevMouseHit.GrassBatch);
-                    break;
-                case MapSelectionMode.Occlusion:
-                    change = change || (LastMouseHit.BoxOccluder != PrevMouseHit.BoxOccluder)
-                                    || (LastMouseHit.OccludeModel != PrevMouseHit.OccludeModel);
-                    break;
-                case MapSelectionMode.WaterQuad:
-                    change = change || (LastMouseHit.WaterQuad != PrevMouseHit.WaterQuad);
-                    break;
-                case MapSelectionMode.Collision:
-                    change = change || (LastMouseHit.CollisionBounds != PrevMouseHit.CollisionBounds);
-                    break;
-                case MapSelectionMode.NavMesh:
-                    change = change || (LastMouseHit.NavPoly != PrevMouseHit.NavPoly)
-                                    || (LastMouseHit.NavPoint != PrevMouseHit.NavPoint)
-                                    || (LastMouseHit.NavPortal != PrevMouseHit.NavPortal);
-                    break;
-                case MapSelectionMode.Path:
-                    change = change || (LastMouseHit.PathNode != PrevMouseHit.PathNode);
-                    break;
-                case MapSelectionMode.TrainTrack:
-                    change = change || (LastMouseHit.TrainTrackNode != PrevMouseHit.TrainTrackNode);
-                    break;
-                case MapSelectionMode.Scenario:
-                    change = change || (LastMouseHit.ScenarioNode != PrevMouseHit.ScenarioNode);
-                    break;
-                case MapSelectionMode.Audio:
-                    change = change || (LastMouseHit.Audio != PrevMouseHit.Audio);
-                    break;
-            }
-
 
             if (change)
             {
@@ -1161,14 +1117,6 @@ namespace CodeWalker
             if(!CurMouseHit.HasHit)
             { return; }
 
-
-            if ((SelectionMode == MapSelectionMode.NavMesh) && (CurMouseHit.NavPoly != null))
-            {
-                return;//navmesh poly isn't needing a selection box..
-            }
-
-
-            bool clip = Renderer.renderboundsclip;
 
             BoundsShaderMode mode = BoundsShaderMode.Box;
             float bsphrad = CurMouseHit.BSphere.Radius;
@@ -1208,11 +1156,9 @@ namespace CodeWalker
             if (CurMouseHit.MloEntityDef != null)
             {
                 scale = Vector3.One;
-                clip = false;
             }
             if (CurMouseHit.WaterQuad != null)
             {
-                clip = false;
             }
             if (CurMouseHit.ScenarioNode != null)
             {
@@ -1231,6 +1177,11 @@ namespace CodeWalker
             {
                 ori = CurMouseHit.NavPortal.Orientation;
             }
+            if (CurMouseHit.NavPoly != null)
+            {
+                Renderer.RenderSelectionNavPolyOutline(CurMouseHit.NavPoly, 0xFFFFFFFF);
+                return;
+            }
             if (CurMouseHit.Audio != null)
             {
                 ori = CurMouseHit.Audio.Orientation;
@@ -1239,18 +1190,33 @@ namespace CodeWalker
                     mode = BoundsShaderMode.Sphere;
                 }
             }
+            if (CurMouseHit.CollisionVertex != null)
+            {
+                var vpos = CurMouseHit.CollisionVertex.Position;
+                var crpos = camrel + ori.Multiply(vpos);
+                var vertexSize = 0.1f;
+                Renderer.RenderSelectionCircle(vpos, vertexSize, 0xFFFFFFFF);
+            }
+            if (CurMouseHit.CollisionPoly != null)
+            {
+                Renderer.RenderSelectionCollisionPolyOutline(CurMouseHit.CollisionPoly, 0xFFFFFFFF, CurMouseHit.EntityDef);
+            }
+            if (CurMouseHit.CollisionBounds != null)
+            {
+                ori = ori * CurMouseHit.BBOrientation;
+            }
 
 
-            Renderer.RenderMouseHit(mode, clip, ref camrel, ref bbmin, ref bbmax, ref scale, ref ori, bsphrad);
+            Renderer.RenderMouseHit(mode, ref camrel, ref bbmin, ref bbmax, ref scale, ref ori, bsphrad);
         }
 
         private void RenderSelection()
         {
-            if (SelectedItem.MultipleSelection)
+            if (SelectedItem.MultipleSelectionItems != null)
             {
-                for (int i = 0; i < SelectedItems.Count; i++)
+                for (int i = 0; i < SelectedItem.MultipleSelectionItems.Length; i++)
                 {
-                    var item = SelectedItems[i];
+                    var item = SelectedItem.MultipleSelectionItems[i];
                     RenderSelection(ref item);
                 }
             }
@@ -1263,18 +1229,21 @@ namespace CodeWalker
         {
             //immediately render the bounding box of the current selection. also, arrows.
 
-            const uint cgrn = 4278255360;// (uint)new Color4(0.0f, 1.0f, 0.0f, 1.0f).ToRgba();
-            const uint cblu = 4294901760;// (uint)new Color4(0.0f, 0.0f, 1.0f, 1.0f).ToRgba();
-            const uint caqu = 4294967040;// (uint)new Color4(0.0f, 1.0f, 1.0f, 1.0f).ToRgba();
-            //const uint cyel = 4278255615;//
+            const uint cred = 0xFF0000FF;
+            const uint cgrn = 0xFF00FF00;
+            const uint cblu = 0xFFFF0000;
+            const uint caqu = 0xFFFFFF00;
+            //const uint cyel = 0xFF00FFFF;
 
-            if (MouseRayCollisionEnabled && MouseRayCollisionVisible)
+            if (ControlBrushEnabled && MouseRayCollision.Hit)
             {
-                if (MouseRayCollision.Hit)
-                {
-                    var arup = GetPerpVec(MouseRayCollision.Normal);
-                    Renderer.RenderBrushRadiusOutline(MouseRayCollision.Position, MouseRayCollision.Normal, arup, ProjectForm.GetInstanceBrushRadius(), cgrn);
-                }
+                var arup = MouseRayCollision.Normal.GetPerpVec();
+                Renderer.RenderBrushRadiusOutline(MouseRayCollision.Position, MouseRayCollision.Normal, arup, ProjectForm.GetInstanceBrushRadius(), cgrn);
+            }
+            if (MouseRayCollisionVisible && MouseRayCollision.Hit)
+            {
+                var arup = MouseRayCollision.Normal.GetPerpVec();
+                Renderer.RenderSelectionArrowOutline(MouseRayCollision.Position, MouseRayCollision.Normal, arup, Quaternion.Identity, 1.0f, 0.05f, cgrn);
             }
 
             if (!ShowSelectionBounds)
@@ -1405,18 +1374,18 @@ namespace CodeWalker
                         {
                             var portal = mloa.portals[ip];
                             if (portal.Corners == null) continue;
-                            p1.Colour = caqu;
                             p2.Colour = caqu;
                             if ((portal._Data.flags & 4) > 0)
                             {
-                                p1.Colour = cblu;
                                 p2.Colour = cblu;
                             }
-                            for (int ic = 0; ic < portal.Corners.Length; ic++)
+                            var pcl = portal.Corners.Length;
+                            for (int ic = 0; ic < pcl; ic++)
                             {
-                                int il = ((ic==0)? portal.Corners.Length : ic) - 1;
-                                p1.Position = mlop + mlo.Orientation.Multiply(portal.Corners[il].XYZ());
-                                p2.Position = mlop + mlo.Orientation.Multiply(portal.Corners[ic].XYZ());
+                                var icn = ic + 1; if (icn >= pcl) icn = 0;
+                                p1.Colour = (ic == 0) ? cred : p2.Colour;//highlight index 0 and winding direction
+                                p1.Position = mlop + mlo.Orientation.Multiply(portal.Corners[ic].XYZ());
+                                p2.Position = mlop + mlo.Orientation.Multiply(portal.Corners[icn].XYZ());
                                 Renderer.SelectionLineVerts.Add(p1);
                                 Renderer.SelectionLineVerts.Add(p2);
                             }
@@ -1449,6 +1418,11 @@ namespace CodeWalker
                         }
                     }
                 }
+            }
+            if (selectionItem.MloRoomDef != null)
+            {
+                camrel += ori.Multiply(selectionItem.BBOffset);
+                ori = ori * selectionItem.BBOrientation;
             }
             if ((selectionItem.ArchetypeExtension != null) || (selectionItem.EntityExtension != null) || (selectionItem.CollisionBounds != null))
             {
@@ -1524,6 +1498,22 @@ namespace CodeWalker
                     wbox.Scale = scale;
                     Renderer.WhiteBoxes.Add(wbox);
                 }
+            }
+            if (selectionItem.CollisionVertex != null)
+            {
+                var vpos = selectionItem.CollisionVertex.Position;
+                var crpos = camrel + ori.Multiply(vpos);
+                var vertexSize = 0.1f;
+                Renderer.RenderSelectionCircle(vpos, vertexSize, cgrn);
+            }
+            else if (selectionItem.CollisionPoly != null)
+            {
+                Renderer.RenderSelectionCollisionPolyOutline(selectionItem.CollisionPoly, cgrn, selectionItem.EntityDef);
+            }
+            if (selectionItem.CollisionBounds != null)
+            {
+                camrel += ori.Multiply(selectionItem.BBOffset);
+                ori = ori * selectionItem.BBOrientation;
             }
 
             if (mode == BoundsShaderMode.Box)
@@ -1644,30 +1634,11 @@ namespace CodeWalker
 
             if (newpos == oldpos) return;
 
-            if (SelectedItem.MultipleSelection)
-            {
-                if (EditEntityPivot)
-                {
-                }
-                else
-                {
-                    var dpos = newpos - SelectedItem.MultipleSelectionCenter;// oldpos;
-                    if (dpos == Vector3.Zero) return; //nothing moved.. (probably due to snap)
-                    for (int i = 0; i < SelectedItems.Count; i++)
-                    {
-                        var refpos = SelectedItems[i].WidgetPosition;
-                        SelectedItems[i].SetPosition(refpos + dpos, false);
-                    }
-                    SelectedItem.MultipleSelectionCenter = newpos;
-                }
-            }
-            else
-            {
-                SelectedItem.SetPosition(newpos, EditEntityPivot);                
-            }
+            SelectedItem.SetPosition(newpos, EditEntityPivot);
+            
             if (ProjectForm != null)
             {
-                ProjectForm.OnWorldSelectionModified(SelectedItem, SelectedItems);
+                ProjectForm.OnWorldSelectionModified(SelectedItem);
             }
         }
         private void Widget_OnRotationChange(Quaternion newrot, Quaternion oldrot)
@@ -1675,22 +1646,11 @@ namespace CodeWalker
             //called during UpdateWidgets()
             if (newrot == oldrot) return;
 
-            if (SelectedItem.MultipleSelection)
-            {
-                if (EditEntityPivot)
-                {
-                }
-                else
-                {
-                }
-            }
-            else
-            {
-                SelectedItem.SetRotation(newrot, oldrot, EditEntityPivot);
-            }
+            SelectedItem.SetRotation(newrot, EditEntityPivot);
+
             if (ProjectForm != null)
             {
-                ProjectForm.OnWorldSelectionModified(SelectedItem, SelectedItems);
+                ProjectForm.OnWorldSelectionModified(SelectedItem);
             }
         }
         private void Widget_OnScaleChange(Vector3 newscale, Vector3 oldscale)
@@ -1698,22 +1658,11 @@ namespace CodeWalker
             //called during UpdateWidgets()
             if (newscale == oldscale) return;
 
-            if (SelectedItem.MultipleSelection)
-            {
-                if (EditEntityPivot)
-                {//editing pivot scale is sort of meaningless..
-                }
-                else
-                {
-                }
-            }
-            else
-            {
-                SelectedItem.SetScale(newscale, oldscale, EditEntityPivot);
-            }
+            SelectedItem.SetScale(newscale, EditEntityPivot);
+
             if (ProjectForm != null)
             {
-                ProjectForm.OnWorldSelectionModified(SelectedItem, SelectedItems);
+                ProjectForm.OnWorldSelectionModified(SelectedItem);
             }
         }
 
@@ -1791,6 +1740,29 @@ namespace CodeWalker
         public YndNode GetPathNodeFromSpace(ushort areaid, ushort nodeid)
         {
             return space.NodeGrid.GetYndNode(areaid, nodeid);
+        }
+
+        public void UpdateCollisionBoundsGraphics(Bounds b)
+        {
+            if (b is BoundBVH bvh)
+            {
+                bvh.BuildBVH();
+            }
+            else if (b is BoundComposite bc)
+            {
+                bc.BuildBVH();
+            }
+
+            var ib = b;
+            while (ib.Parent != null)
+            {
+                ib = ib.Parent;
+            }
+
+            //lock (Renderer.RenderSyncRoot)
+            {
+                Renderer.Invalidate(ib);
+            }
         }
 
         public void UpdateNavYnvGraphics(YnvFile ynv, bool fullupdate)
@@ -1875,6 +1847,29 @@ namespace CodeWalker
             audiozones.PlacementsDict.Remove(rel); //should cause a rebuild to add/remove items
         }
 
+
+        public void SetCameraTransform(Vector3 pos, Quaternion rot)
+        {
+            camera.FollowEntity.Position = pos;
+            camera.FollowEntity.Orientation = rot;
+            camera.FollowEntity.OrientationInv = Quaternion.Invert(rot);
+            camera.TargetRotation = Vector3.Zero;
+            camera.TargetDistance = 0.01f;
+        }
+        public void SetCameraClipPlanes(float znear, float zfar)
+        {
+            //sets the camera clip planes to the specified values, for use in eg cutscenes
+            camera.ZNear = znear;
+            camera.ZFar = zfar;
+            camera.UpdateProj = true;
+        }
+        public void ResetCameraClipPlanes()
+        {
+            //resets the camera clip planes to the values in the UI controls.
+            camera.ZNear = (float)NearClipUpDown.Value;
+            camera.ZFar = (float)FarClipUpDown.Value;
+            camera.UpdateProj = true;
+        }
 
         public Vector3 GetCameraPosition()
         {
@@ -2013,27 +2008,6 @@ namespace CodeWalker
         }
 
 
-        public static Vector3 GetPerpVec(Vector3 n)
-        {
-            //make a vector perpendicular to the given one
-            float nx = Math.Abs(n.X);
-            float ny = Math.Abs(n.Y);
-            float nz = Math.Abs(n.Z);
-            if ((nx < ny) && (nx < nz))
-            {
-                return Vector3.Cross(n, Vector3.Right);
-            }
-            else if (ny < nz)
-            {
-                return Vector3.Cross(n, Vector3.Up);
-            }
-            else
-            {
-                return Vector3.Cross(n, Vector3.ForwardLH);
-            }
-        }
-
-
         private void SpawnTestEntity(bool cameraCenter = false)
         {
             if (!space.Inited) return;
@@ -2076,6 +2050,7 @@ namespace CodeWalker
             e.Radius = arch.BSRadius * 0.7f;
             e.EnableCollisions = true;
             e.Enabled = true;
+            e.Lifetime = 20.0f;
 
             lock (Renderer.RenderSyncRoot)
             {
@@ -2155,17 +2130,25 @@ namespace CodeWalker
             //reset variables for beginning the mouse hit test
             CurMouseHit.Clear();
 
-            // Get whether or not we can brush from the project form.
-            if (Input.CtrlPressed && ProjectForm != null && ProjectForm.CanPaintInstances())
+         
+            if (Input.CtrlPressed && ProjectForm != null && ProjectForm.CanPaintInstances())   // Get whether or not we can brush from the project form.
             {
                 ControlBrushEnabled = true;
-                MouseRayCollisionEnabled = true;
+                MouseRayCollisionVisible = false;
                 MouseRayCollision = GetSpaceMouseRay();
             }
-            else if (MouseRayCollisionEnabled)
+            else
             {
                 ControlBrushEnabled = false;
-                MouseRayCollisionEnabled = false;
+                if (Input.CtrlPressed && MouseRayCollisionEnabled)
+                {
+                    MouseRayCollisionVisible = true;
+                    MouseRayCollision = GetSpaceMouseRay();
+                }
+                else
+                {
+                    MouseRayCollisionVisible = false;
+                }
             }
 
 
@@ -2182,30 +2165,57 @@ namespace CodeWalker
         public SpaceRayIntersectResult GetSpaceMouseRay()
         {
             SpaceRayIntersectResult ret = new SpaceRayIntersectResult();
-            if (space.Inited && space.Grid != null)
+            if (space.Inited && space.BoundsStore != null)
             {
                 Ray mray = new Ray();
                 mray.Position = camera.MouseRay.Position + camera.Position;
                 mray.Direction = camera.MouseRay.Direction;
-                return space.RayIntersect(mray);
+                return space.RayIntersect(mray, float.MaxValue, collisionmeshlayers);
             }
             return ret;
         }
 
         public SpaceRayIntersectResult Raycast(Ray ray)
         {
-            return space.RayIntersect(ray);
+            return space.RayIntersect(ray, float.MaxValue, collisionmeshlayers);
         }
 
+        private void UpdateMouseHits()
+        {
+            UpdateMouseHitsFromRenderer();
+            UpdateMouseHitsFromSpace();
+            UpdateMouseHitsFromProject();
+        }
         private void UpdateMouseHitsFromRenderer()
         {
             foreach (var rd in Renderer.RenderedDrawables)
             {
                 UpdateMouseHits(rd.Drawable, rd.Archetype, rd.Entity);
             }
-            foreach (var rb in Renderer.RenderedBoundComps)
+        }
+        private void UpdateMouseHitsFromSpace()
+        {
+            if (SelectionMode == MapSelectionMode.Collision)
             {
-                UpdateMouseHits(rb.BoundComp, rb.Entity);
+                MouseRayCollision = GetSpaceMouseRay();
+
+                if (MouseRayCollision.Hit)
+                {
+                    CurMouseHit.UpdateCollisionFromRayHit(ref MouseRayCollision, camera);
+                }
+            }
+        }
+        private void UpdateMouseHitsFromProject()
+        {
+            if (ProjectForm == null) return;
+
+            if (SelectionMode == MapSelectionMode.Collision)
+            {
+
+                ProjectForm.GetMouseCollision(camera, ref CurMouseHit);
+
+
+
             }
         }
         private void UpdateMouseHits(DrawableBase drawable, Archetype arche, YmapEntityDef entity)
@@ -2513,59 +2523,6 @@ namespace CodeWalker
 
 
         }
-        private void UpdateMouseHits(RenderableBoundComposite rndbc, YmapEntityDef entity)
-        {
-            if (SelectionMode != MapSelectionMode.Collision) return;
-
-            var position = entity?.Position ?? Vector3.Zero;
-            var orientation = entity?.Orientation ?? Quaternion.Identity;
-            var scale = entity?.Scale ?? Vector3.One;
-
-            var camrel = position - camera.Position;
-
-
-
-            BoundingBox bbox = new BoundingBox();
-            Ray mray = new Ray();
-            mray.Position = camera.MouseRay.Position + camera.Position;
-            mray.Direction = camera.MouseRay.Direction;
-            float hitdist = float.MaxValue;
-            Quaternion orinv = Quaternion.Invert(orientation);
-            Ray mraytrn = new Ray();
-            mraytrn.Position = orinv.Multiply(camera.MouseRay.Position - camrel);
-            mraytrn.Direction = orinv.Multiply(mray.Direction);
-
-            MapBox mb = new MapBox();
-            mb.CamRelPos = camrel;// rbginst.Inst.CamRel;
-            mb.Orientation = orientation;
-            mb.Scale = scale;
-
-            foreach (var geom in rndbc.Geometries)
-            {
-                if (geom == null) continue;
-
-                mb.BBMin = geom.BoundGeom.BoundingBoxMin;
-                mb.BBMax = geom.BoundGeom.BoundingBoxMax;
-
-                var cent = camrel + (mb.BBMin + mb.BBMax) * 0.5f;
-                if (cent.Length() > Renderer.renderboundsmaxdist) continue;
-
-                Renderer.BoundingBoxes.Add(mb);
-
-                bbox.Minimum = mb.BBMin * scale;
-                bbox.Maximum = mb.BBMax * scale;
-                if (mraytrn.Intersects(ref bbox, out hitdist) && (hitdist < CurMouseHit.HitDist) && (hitdist > 0))
-                {
-                    CurMouseHit.CollisionBounds = geom.BoundGeom;
-                    CurMouseHit.EntityDef = entity;
-                    CurMouseHit.Archetype = entity?.Archetype;
-                    CurMouseHit.HitDist = hitdist;
-                    CurMouseHit.CamRel = camrel;
-                    CurMouseHit.AABB = bbox;
-                }
-            }
-
-        }
         private void UpdateMouseHits(YmapFile ymap)
         {
             //find mouse hits for things like time cycle mods and car generators in ymaps.
@@ -2844,11 +2801,6 @@ namespace CodeWalker
                 {
                     UpdateMouseHits(ynv, ynv.Nav.SectorTree, ynv.Nav.SectorTree, ref mray);
                 }
-            }
-
-            if ((CurMouseHit.NavPoly != null) && MouseSelectEnabled)
-            {
-                Renderer.RenderSelectionNavPolyOutline(CurMouseHit.NavPoly, 0xFFFFFFFF);
             }
 
         }
@@ -3252,6 +3204,45 @@ namespace CodeWalker
             }
         }
 
+        public void SelectItems(object obj, bool addSelection = false)
+        {
+            if (obj == null)
+            {
+                SelectItem(null, addSelection);
+                return;
+            }
+            if (obj is object[] arr)
+            {
+                SelectItem(null, addSelection);
+                foreach (var mobj in arr)
+                {
+                    SelectItems(mobj, true);
+                }
+                if (!addSelection)
+                {
+                    UpdateSelectionUI(true);
+                }
+                if ((ProjectForm != null) && !addSelection)
+                {
+                    ProjectForm.OnWorldSelectionChanged(SelectedItem);
+                }
+            }
+            else if (obj is YmapEntityDef ent) SelectEntity(ent, addSelection);
+            else if (obj is YmapCarGen cargen) SelectCarGen(cargen, addSelection);
+            else if (obj is YmapGrassInstanceBatch grass) SelectGrassBatch(grass, addSelection);
+            else if (obj is MCMloRoomDef room) SelectMloRoom(room, null, addSelection);//how to get instance?
+            else if (obj is Bounds bounds) SelectCollisionBounds(bounds, addSelection);
+            else if (obj is BoundPolygon cpoly) SelectCollisionPoly(cpoly, addSelection);
+            else if (obj is BoundVertex cvert) SelectCollisionVertex(cvert, addSelection);
+            else if (obj is YnvPoly npoly) SelectNavPoly(npoly, addSelection);
+            else if (obj is YnvPoint npoint) SelectNavPoint(npoint, addSelection);
+            else if (obj is YnvPortal nportal) SelectNavPortal(nportal, addSelection);
+            else if (obj is YndNode pnode) SelectPathNode(pnode, addSelection);
+            else if (obj is YndLink plink) SelectPathLink(plink, addSelection);
+            else if (obj is TrainTrackNode tnode) SelectTrainTrackNode(tnode, addSelection);
+            else if (obj is ScenarioNode snode) SelectScenarioNode(snode, addSelection);
+            else if (obj is AudioPlacement audio) SelectAudio(audio, addSelection);
+        }
         public void SelectItem(MapSelection? mhit = null, bool addSelection = false)
         {
             var mhitv = mhit.HasValue ? mhit.Value : new MapSelection();
@@ -3284,38 +3275,42 @@ namespace CodeWalker
 
             if (addSelection)
             {
-                if (SelectedItem.MultipleSelection)
+                var items = new List<MapSelection>();
+                if (SelectedItem.MultipleSelectionItems != null)
                 {
+                    items.AddRange(SelectedItem.MultipleSelectionItems);
+
                     if (mhitv.HasValue) //incoming selection isn't empty...
                     {
                         //search the list for a match, remove it if already there, otherwise add it.
                         bool found = false;
-                        foreach (var item in SelectedItems)
+                        foreach (var item in items)
                         {
                             if (!item.CheckForChanges(mhitv))
                             {
-                                SelectedItems.Remove(item);
+                                items.Remove(item);
                                 found = true;
                                 break;
                             }
                         }
                         if (found)
                         {
-                            if (SelectedItems.Count == 1)
+                            if (items.Count == 1)
                             {
-                                mhitv = SelectedItems[0];
-                                SelectedItems.Clear();
+                                mhitv = items[0];
+                                items.Clear();
                             }
-                            else if (SelectedItems.Count <= 0)
+                            else if (items.Count <= 0)
                             {
                                 mhitv.Clear();
-                                SelectedItems.Clear();//this shouldn't really happen..
+                                items.Clear();//this shouldn't really happen..
                             }
+                            mhitv.SetMultipleSelectionItems(items.ToArray());
                         }
                         else
                         {
-                            mhitv.MultipleSelection = false;
-                            SelectedItems.Add(mhitv);
+                            mhitv.SetMultipleSelectionItems(null);
+                            items.Add(mhitv);
                         }
                         change = true;
                     }
@@ -3332,11 +3327,11 @@ namespace CodeWalker
                         {
                             if (SelectedItem.HasValue) //add the existing item to the selection list, if it's not empty
                             {
-                                SelectedItem.MultipleSelection = false;
-                                SelectedItems.Add(SelectedItem);
-                                mhitv.MultipleSelection = false;
-                                SelectedItems.Add(mhitv);
-                                SelectedItem.MultipleSelection = true;
+                                mhitv.SetMultipleSelectionItems(null);
+                                SelectedItem.SetMultipleSelectionItems(null);
+                                items.Add(SelectedItem);
+                                items.Add(mhitv);
+                                SelectedItem.SetMultipleSelectionItems(items.ToArray());
                             }
                         }
                         else //empty incoming value... do nothing?
@@ -3347,39 +3342,25 @@ namespace CodeWalker
                     else //same thing was selected a 2nd time, just clear the selection.
                     {
                         SelectedItem.Clear();
-                        SelectedItems.Clear();
                         mhit = null; //dont's wants to selects it agains!
                         change = true;
                     }
                 }
 
-                if (SelectedItems.Count > 1)
+                if (items.Count > 1)
                 {
                     //iterate the selected items, and calculate the selection position
-                    var center = Vector3.Zero;
-                    foreach (var item in SelectedItems)
-                    {
-                        center += item.WidgetPosition;
-                    }
-                    if (SelectedItems.Count > 0)
-                    {
-                        center *= (1.0f / SelectedItems.Count);
-                    }
-
                     mhitv.Clear();
-                    mhitv.MultipleSelection = true;
-                    mhitv.MultipleSelectionCenter = center;
+                    mhitv.SetMultipleSelectionItems(items.ToArray());
                 }
             }
             else
             {
-                if (SelectedItem.MultipleSelection)
+                if (SelectedItem.MultipleSelectionItems != null)
                 {
                     change = true;
-                    SelectedItem.MultipleSelection = false;
                     SelectedItem.Clear();
                 }
-                SelectedItems.Clear();
             }
 
             if (!change)
@@ -3409,7 +3390,10 @@ namespace CodeWalker
 
                 if (change)
                 {
-                    UpdateSelectionUI(true);
+                    if (!addSelection)
+                    {
+                        UpdateSelectionUI(true);
+                    }
 
                     Widget.Visible = SelectedItem.CanShowWidget;
                     if (Widget.Visible)
@@ -3417,31 +3401,40 @@ namespace CodeWalker
                         Widget.Position = SelectedItem.WidgetPosition;
                         Widget.Rotation = SelectedItem.WidgetRotation;
                         Widget.RotationWidget.EnableAxes = SelectedItem.WidgetRotationAxes;
+                        Widget.ScaleWidget.LockXY = SelectedItem.WidgetScaleLockXY;
                         Widget.Scale = SelectedItem.WidgetScale;
                     }
                 }
             }
-            if (change && (ProjectForm != null))
+            if (change && (ProjectForm != null) && !addSelection)
             {
                 ProjectForm.OnWorldSelectionChanged(SelectedItem);
             }
         }
-        public void SelectMulti(MapSelection[] items)
+        public void SelectMulti(MapSelection[] items, bool addSelection = false)
         {
-            SelectItem(null);
+            SelectItem(null, addSelection);
             if (items != null)
             {
                 foreach (var item in items)
                 {
                     SelectItem(item, true);
                 }
+                if (!addSelection)
+                {
+                    UpdateSelectionUI(true);
+                }
+                if ((ProjectForm != null) && !addSelection)
+                {
+                    ProjectForm.OnWorldSelectionChanged(SelectedItem);
+                }
             }
         }
-        public void SelectEntity(YmapEntityDef entity)
+        public void SelectEntity(YmapEntityDef entity, bool addSelection = false)
         {
             if (entity == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3453,58 +3446,109 @@ namespace CodeWalker
                 {
                     ms.MloEntityDef = entity;
                 }
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectCarGen(YmapCarGen cargen)
+        public void SelectCarGen(YmapCarGen cargen, bool addSelection = false)
         {
             if (cargen == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
                 MapSelection ms = new MapSelection();
                 ms.CarGenerator = cargen;
                 ms.AABB = new BoundingBox(cargen.BBMin, cargen.BBMax);
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectGrassBatch(YmapGrassInstanceBatch batch)
+        public void SelectGrassBatch(YmapGrassInstanceBatch batch, bool addSelection = false)
         {
             if (batch == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
                 MapSelection ms = new MapSelection();
                 ms.GrassBatch = batch;
                 ms.AABB = new BoundingBox(batch.AABBMin, batch.AABBMax);
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectMloRoom(MCMloRoomDef room, MloInstanceData instance)
+        public void SelectMloRoom(MCMloRoomDef room, MloInstanceData instance, bool addSelection = false)
         {
             if (room == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else if (instance != null)
             {
                 MapSelection ms = new MapSelection();
                 ms.MloRoomDef = room;
-                Vector3 min = instance.Owner.Position + instance.Owner.Orientation.Multiply(room.BBMin_CW);
-                Vector3 max = instance.Owner.Position + instance.Owner.Orientation.Multiply(room.BBMax_CW);
-                ms.AABB = new BoundingBox(min, max);
-                SelectItem(ms);
+                ms.AABB = new BoundingBox(room.BBMin_CW, room.BBMax_CW);
+                ms.BBOffset = instance.Owner.Position;
+                ms.BBOrientation = instance.Owner.Orientation;
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectNavPoly(YnvPoly poly)
+        public void SelectCollisionBounds(Bounds b, bool addSelection = false)
+        {
+            if (b == null)
+            {
+                SelectItem(null, addSelection);
+            }
+            else
+            {
+
+                MapSelection ms = new MapSelection();
+                ms.CollisionBounds = b;
+
+                ms.AABB = new BoundingBox(b.BoxMin, b.BoxMax);
+
+                SelectItem(ms, addSelection);
+            }
+        }
+        public void SelectCollisionPoly(BoundPolygon p, bool addSelection = false)
+        {
+            if (p == null)
+            {
+                SelectItem(null, addSelection);
+            }
+            else
+            {
+
+                MapSelection ms = new MapSelection();
+                ms.CollisionPoly = p;
+
+                //ms.AABB = new BoundingBox(p.BoundingBoxMin, p.BoundingBoxMax);
+
+                SelectItem(ms, addSelection);
+            }
+        }
+        public void SelectCollisionVertex(BoundVertex v, bool addSelection = false)
+        {
+            if (v == null)
+            {
+                SelectItem(null, addSelection);
+            }
+            else
+            {
+
+                MapSelection ms = new MapSelection();
+                ms.CollisionVertex = v;
+
+                //ms.AABB = new BoundingBox(p.BoundingBoxMin, p.BoundingBoxMax);
+
+                SelectItem(ms, addSelection);
+            }
+        }
+        public void SelectNavPoly(YnvPoly poly, bool addSelection = false)
         {
             if (poly == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3519,14 +3563,14 @@ namespace CodeWalker
                 //{
                 //    ms.AABB = new BoundingBox(sect.AABBMin.XYZ(), sect.AABBMax.XYZ());
                 //}
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectNavPoint(YnvPoint point)
+        public void SelectNavPoint(YnvPoint point, bool addSelection = false)
         {
             if (point == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3535,14 +3579,14 @@ namespace CodeWalker
                 MapSelection ms = new MapSelection();
                 ms.NavPoint = point;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectNavPortal(YnvPortal portal)
+        public void SelectNavPortal(YnvPortal portal, bool addSelection = false)
         {
             if (portal == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3551,14 +3595,14 @@ namespace CodeWalker
                 MapSelection ms = new MapSelection();
                 ms.NavPortal = portal;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectPathNode(YndNode node)
+        public void SelectPathNode(YndNode node, bool addSelection = false)
         {
             if (node == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3567,15 +3611,15 @@ namespace CodeWalker
                 MapSelection ms = new MapSelection();
                 ms.PathNode = node;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectPathLink(YndLink link)
+        public void SelectPathLink(YndLink link, bool addSelection = false)
         {
             var node = link?.Node1;
             if (node == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3585,14 +3629,14 @@ namespace CodeWalker
                 ms.PathNode = node;
                 ms.PathLink = link;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectTrainTrackNode(TrainTrackNode node)
+        public void SelectTrainTrackNode(TrainTrackNode node, bool addSelection = false)
         {
             if (node == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3601,14 +3645,14 @@ namespace CodeWalker
                 MapSelection ms = new MapSelection();
                 ms.TrainTrackNode = node;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectScenarioNode(ScenarioNode node)
+        public void SelectScenarioNode(ScenarioNode node, bool addSelection = false)
         {
             if (node == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3617,14 +3661,14 @@ namespace CodeWalker
                 MapSelection ms = new MapSelection();
                 ms.ScenarioNode = node;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectScenarioEdge(ScenarioNode node, MCScenarioChainingEdge edge)
+        public void SelectScenarioEdge(ScenarioNode node, MCScenarioChainingEdge edge, bool addSelection = false)
         {
             if (node == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3634,14 +3678,14 @@ namespace CodeWalker
                 ms.ScenarioNode = node;
                 ms.ScenarioEdge = edge;
                 ms.AABB = new BoundingBox(new Vector3(-nrad), new Vector3(nrad));
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
-        public void SelectAudio(AudioPlacement audio)
+        public void SelectAudio(AudioPlacement audio, bool addSelection = false)
         {
             if (audio == null)
             {
-                SelectItem(null);
+                SelectItem(null, addSelection);
             }
             else
             {
@@ -3649,7 +3693,7 @@ namespace CodeWalker
                 ms.Audio = audio;
                 ms.AABB = new BoundingBox(audio.HitboxMin, audio.HitboxMax);
                 ms.BSphere = new BoundingSphere(audio.Position, audio.HitSphereRad);
-                SelectItem(ms);
+                SelectItem(ms, addSelection);
             }
         }
         private void SelectMousedItem()
@@ -3682,7 +3726,7 @@ namespace CodeWalker
 
                     if (InfoForm != null)
                     {
-                        InfoForm.SetSelection(SelectedItem, SelectedItems);
+                        InfoForm.SetSelection(SelectedItem);
                     }
                 }
             }
@@ -3718,11 +3762,18 @@ namespace CodeWalker
             ToolbarCopyButton.Enabled = false;
             ToolbarDeleteItemButton.Enabled = false;
             ToolbarDeleteItemButton.Text = "Delete";
+            ToolbarAddItemButton.ToolTipText = "Add";
+            ToolbarAddItemButton.Enabled = false;
+            ToolbarPasteButton.Enabled = CopiedItem.CanCopyPaste;
 
-            if (item.MultipleSelection)
+
+            if (item.MultipleSelectionItems != null)
             {
                 SelectionEntityTabPage.Text = "Multiple items";
-                SelEntityPropertyGrid.SelectedObject = SelectedItems.ToArray();
+                SelEntityPropertyGrid.SelectedObject = item.MultipleSelectionItems;
+                ToolbarCopyButton.Enabled = item.CanCopyPaste;
+                ToolbarDeleteItemButton.Enabled = true;
+                ToolbarDeleteItemButton.Text = "Delete multiple items";
             }
             else if (item.TimeCycleModifier != null)
             {
@@ -3847,10 +3898,26 @@ namespace CodeWalker
                 SelExtensionPropertyGrid.SelectedObject = item.ArchetypeExtension;
                 ShowSelectedExtensionTab(true);
             }
+            else if (item.CollisionVertex != null)
+            {
+                SelExtensionPropertyGrid.SelectedObject = item.CollisionVertex;
+                ShowSelectedExtensionTab(true, "Coll");
+                ToolbarDeleteItemButton.Enabled = true;
+                ToolbarDeleteItemButton.Text = "Delete collision vertex";
+            }
+            else if (item.CollisionPoly != null)
+            {
+                SelExtensionPropertyGrid.SelectedObject = item.CollisionPoly;
+                ShowSelectedExtensionTab(true, "Coll");
+                ToolbarDeleteItemButton.Enabled = true;
+                ToolbarDeleteItemButton.Text = "Delete collision poly";
+            }
             else if (item.CollisionBounds != null)
             {
                 SelExtensionPropertyGrid.SelectedObject = item.CollisionBounds;
                 ShowSelectedExtensionTab(true, "Coll");
+                ToolbarDeleteItemButton.Enabled = true;
+                ToolbarDeleteItemButton.Text = "Delete collision bounds";
             }
             else
             {
@@ -3859,26 +3926,11 @@ namespace CodeWalker
             }
 
 
-            //var ent = SelectedItem.EntityDef;
-            //ToolbarDeleteEntityButton.Enabled = false;
-            ////ToolbarAddEntityButton.Enabled = false;
-            //ToolbarCopyButton.Enabled = (ent != null);
-            //if (ent != null)
-            //{
-            //    ToolbarDeleteEntityButton.Enabled = true;
-            //    //ToolbarAddEntityButton.Enabled = true;
-            //    //if (ProjectForm != null)
-            //    //{
-            //    //    ToolbarDeleteEntityButton.Enabled = ProjectForm.IsCurrentEntity(ent);
-            //    //}
-            //}
-            //bool enableymapui = (ent != null) && (ent.Ymap != null);
-            //var ymap = ent?.Ymap;
 
-            bool enableymapui = (ymap != null);
-
-            EnableYmapUI(enableymapui, (ymap != null) ? ymap.Name : "");
-
+            if (ymap != null)
+            {
+                EnableYmapUI(true, ymap.Name);
+            }
             if (ynd != null)
             {
                 EnableYndUI(true, ynd.Name);
@@ -4024,7 +4076,7 @@ namespace CodeWalker
             if (InfoForm == null)
             {
                 InfoForm = new WorldInfoForm(this);
-                InfoForm.SetSelection(SelectedItem, SelectedItems);
+                InfoForm.SetSelection(SelectedItem);
                 InfoForm.SetSelectionMode(SelectionModeStr, MouseSelectEnabled);
                 InfoForm.Show(this);
             }
@@ -4096,6 +4148,29 @@ namespace CodeWalker
         {
             SearchForm = null;
             //ToolbarSearchWindowButton.Checked = false;
+        }
+
+        private void ShowCutsceneForm()
+        {
+            if (CutsceneForm == null)
+            {
+                CutsceneForm = new CutsceneForm(this);
+                CutsceneForm.Show(this);
+            }
+            else
+            {
+                if (CutsceneForm.WindowState == FormWindowState.Minimized)
+                {
+                    CutsceneForm.WindowState = FormWindowState.Normal;
+                }
+                CutsceneForm.Focus();
+            }
+            //ToolbarCutsceneWindowButton.Checked = true;
+        }
+        public void OnCutsceneFormClosed()
+        {
+            CutsceneForm = null;
+            //ToolbarCutsceneWindowButton.Checked = false;
         }
 
         public void ShowModel(string name)
@@ -4605,6 +4680,7 @@ namespace CodeWalker
             WindowState = s.WindowMaximized ? FormWindowState.Maximized : WindowState;
             FullScreenCheckBox.Checked = s.FullScreen;
             WireframeCheckBox.Checked = s.Wireframe;
+            DeferredShadingCheckBox.Checked = s.Deferred;
             HDRRenderingCheckBox.Checked = s.HDR;
             ShadowsCheckBox.Checked = s.Shadows;
             SkydomeCheckBox.Checked = s.Skydome;
@@ -4639,6 +4715,7 @@ namespace CodeWalker
             s.WindowMaximized = (WindowState == FormWindowState.Maximized);
             s.FullScreen = FullScreenCheckBox.Checked;
             s.Wireframe = WireframeCheckBox.Checked;
+            s.Deferred = DeferredShadingCheckBox.Checked;
             s.HDR = HDRRenderingCheckBox.Checked;
             s.Shadows = ShadowsCheckBox.Checked;
             s.Skydome = SkydomeCheckBox.Checked;
@@ -4698,23 +4775,9 @@ namespace CodeWalker
 
 
 
-        private bool CanMarkUndo()
-        {
-            if (SelectedItem.MultipleSelection) return true;
-            if (SelectedItem.EntityDef != null) return true;
-            if (SelectedItem.CarGenerator != null) return true;
-            if (SelectedItem.PathNode != null) return true;
-            //if (SelectedItem.NavPoly != null) return true;
-            if (SelectedItem.NavPoint != null) return true;
-            if (SelectedItem.NavPortal != null) return true;
-            if (SelectedItem.TrainTrackNode != null) return true;
-            if (SelectedItem.ScenarioNode != null) return true;
-            if (SelectedItem.Audio != null) return true;
-            return false;
-        }
         private void MarkUndoStart(Widget w)
         {
-            if (!CanMarkUndo()) return;
+            if (!SelectedItem.CanMarkUndo()) return;
             if (Widget is TransformWidget)
             {
                 UndoStartPosition = Widget.Position;
@@ -4724,106 +4787,12 @@ namespace CodeWalker
         }
         private void MarkUndoEnd(Widget w)
         {
-            if (!CanMarkUndo()) return;
-            var ent = SelectedItem.EntityDef;
-            var cargen = SelectedItem.CarGenerator;
-            var pathnode = SelectedItem.PathNode;
-            var navpoly = SelectedItem.NavPoly;
-            var navpoint = SelectedItem.NavPoint;
-            var navportal = SelectedItem.NavPortal;
-            var trainnode = SelectedItem.TrainTrackNode;
-            var scenarionode = SelectedItem.ScenarioNode;
-            var audio = SelectedItem.Audio;
+            if (!SelectedItem.CanMarkUndo()) return;
             TransformWidget tw = Widget as TransformWidget;
             UndoStep s = null;
             if (tw != null)
             {
-                if (SelectedItem.MultipleSelection)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new MultiPositionUndoStep(SelectedItem, SelectedItems.ToArray(), UndoStartPosition, this); break;
-                    }
-                }
-                else if (ent != null)
-                {
-                    if (EditEntityPivot)
-                    {
-                        switch (tw.Mode)
-                        {
-                            case WidgetMode.Position: s = new EntityPivotPositionUndoStep(ent, UndoStartPosition); break;
-                            case WidgetMode.Rotation: s = new EntityPivotRotationUndoStep(ent, UndoStartRotation); break;
-                        }
-                    }
-                    else
-                    {
-                        switch (tw.Mode)
-                        {
-                            case WidgetMode.Position: s = new EntityPositionUndoStep(ent, UndoStartPosition); break;
-                            case WidgetMode.Rotation: s = new EntityRotationUndoStep(ent, UndoStartRotation); break;
-                            case WidgetMode.Scale: s = new EntityScaleUndoStep(ent, UndoStartScale); break;
-                        }
-                    }
-                }
-                else if (cargen != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new CarGenPositionUndoStep(cargen, UndoStartPosition); break;
-                        case WidgetMode.Rotation: s = new CarGenRotationUndoStep(cargen, UndoStartRotation); break;
-                        case WidgetMode.Scale: s = new CarGenScaleUndoStep(cargen, UndoStartScale); break;
-                    }
-                }
-                else if (pathnode != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new PathNodePositionUndoStep(pathnode, UndoStartPosition, this); break;
-                    }
-                }
-                else if (navpoly != null)
-                {
-                    //todo...
-                }
-                else if (navpoint != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new NavPointPositionUndoStep(navpoint, UndoStartPosition, this); break;
-                        case WidgetMode.Rotation: s = new NavPointRotationUndoStep(navpoint, UndoStartRotation, this); break;
-                    }
-                }
-                else if (navportal != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new NavPortalPositionUndoStep(navportal, UndoStartPosition, this); break;
-                        case WidgetMode.Rotation: s = new NavPortalRotationUndoStep(navportal, UndoStartRotation, this); break;
-                    }
-                }
-                else if (trainnode != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new TrainTrackNodePositionUndoStep(trainnode, UndoStartPosition, this); break;
-                    }
-                }
-                else if (scenarionode != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new ScenarioNodePositionUndoStep(scenarionode, UndoStartPosition, this); break;
-                        case WidgetMode.Rotation: s = new ScenarioNodeRotationUndoStep(scenarionode, UndoStartRotation, this); break;
-                    }
-                }
-                else if (audio != null)
-                {
-                    switch (tw.Mode)
-                    {
-                        case WidgetMode.Position: s = new AudioPositionUndoStep(audio, UndoStartPosition); break;
-                        case WidgetMode.Rotation: s = new AudioRotationUndoStep(audio, UndoStartRotation); break;
-                    }
-                }
+                s = SelectedItem.CreateUndoStep(tw.Mode, UndoStartPosition, UndoStartRotation, UndoStartScale, this, EditEntityPivot);
             }
             if (s != null)
             {
@@ -4842,7 +4811,7 @@ namespace CodeWalker
 
             if (ProjectForm != null)
             {
-                ProjectForm.OnWorldSelectionModified(SelectedItem, SelectedItems);
+                ProjectForm.OnWorldSelectionModified(SelectedItem);
             }
 
             UpdateUndoUI();
@@ -4857,7 +4826,7 @@ namespace CodeWalker
 
             if (ProjectForm != null)
             {
-                ProjectForm.OnWorldSelectionModified(SelectedItem, SelectedItems);
+                ProjectForm.OnWorldSelectionModified(SelectedItem);
             }
 
             UpdateUndoUI();
@@ -4904,6 +4873,7 @@ namespace CodeWalker
                     ToolbarOpenButton.Enabled = true;
                     ToolbarProjectWindowButton.Enabled = true;
                     ToolsMenuProjectWindow.Enabled = true;
+                    ToolsMenuCutsceneViewer.Enabled = true;
                     ToolsMenuBinarySearch.Enabled = true;
                     ToolsMenuJenkInd.Enabled = true;
                 }
@@ -4946,8 +4916,15 @@ namespace CodeWalker
 
             ToolbarAddItemButton.ToolTipText = "Add " + type + (enable ? (" to " + filename) : "");
             ToolbarAddItemButton.Enabled = enable;
-            //ToolbarDeleteEntityButton.Enabled = enable;
-            ToolbarPasteButton.Enabled = (CopiedEntity != null) && enable;
+        }
+        public void EnableYbnUI(bool enable, string filename)
+        {
+
+            if (enable) //only do something if a ybn is selected - EnableYmapUI will handle the no selection case.. 
+            {
+                //ToolbarAddItemButton.ToolTipText = "Add " + type + (enable ? (" to " + filename) : "");
+                //ToolbarAddItemButton.Enabled = enable;
+            }
         }
         public void EnableYndUI(bool enable, string filename)
         {
@@ -4961,8 +4938,6 @@ namespace CodeWalker
             {
                 ToolbarAddItemButton.ToolTipText = "Add " + type + (enable ? (" to " + filename) : "");
                 ToolbarAddItemButton.Enabled = enable;
-                //ToolbarDeleteEntityButton.Enabled = enable;
-                ToolbarPasteButton.Enabled = (CopiedPathNode != null) && enable;
             }
         }
         public void EnableYnvUI(bool enable, string filename)
@@ -4977,8 +4952,6 @@ namespace CodeWalker
             {
                 ToolbarAddItemButton.ToolTipText = "Add " + type + (enable ? (" to " + filename) : "");
                 ToolbarAddItemButton.Enabled = enable;
-                //ToolbarDeleteEntityButton.Enabled = enable;
-                ToolbarPasteButton.Enabled = (CopiedNavPoly != null) && enable;
             }
         }
         public void EnableTrainsUI(bool enable, string filename)
@@ -4993,8 +4966,6 @@ namespace CodeWalker
             {
                 ToolbarAddItemButton.ToolTipText = "Add " + type + (enable ? (" to " + filename) : "");
                 ToolbarAddItemButton.Enabled = enable;
-                //ToolbarDeleteEntityButton.Enabled = enable;
-                ToolbarPasteButton.Enabled = false;// (CopiedTrainNode != null) && enable;
             }
         }
         public void EnableScenarioUI(bool enable, string filename)
@@ -5009,8 +4980,6 @@ namespace CodeWalker
             {
                 ToolbarAddItemButton.ToolTipText = "Add " + type + (enable ? (" to " + filename) : "");
                 ToolbarAddItemButton.Enabled = enable;
-                //ToolbarDeleteEntityButton.Enabled = enable;
-                ToolbarPasteButton.Enabled = (CopiedScenarioNode != null) && enable;
             }
         }
         public void EnableAudioUI(bool enable, string filename) //TODO
@@ -5041,6 +5010,16 @@ namespace CodeWalker
         {
             ShowProjectForm();
             ProjectForm.NewYmap();
+        }
+        private void NewYtyp()
+        {
+            ShowProjectForm();
+            ProjectForm.NewYtyp();
+        }
+        private void NewYbn()
+        {
+            ShowProjectForm();
+            ProjectForm.NewYbn();
         }
         private void NewYnd()
         {
@@ -5090,6 +5069,16 @@ namespace CodeWalker
             ShowProjectForm();
             ProjectForm.OpenYmap();
         }
+        private void OpenYtyp()
+        {
+            ShowProjectForm();
+            ProjectForm.OpenYtyp();
+        }
+        private void OpenYbn()
+        {
+            ShowProjectForm();
+            ProjectForm.OpenYbn();
+        }
         private void OpenYnd()
         {
             ShowProjectForm();
@@ -5129,633 +5118,297 @@ namespace CodeWalker
 
         private void AddItem()
         {
+            if (ProjectForm == null) return;
             switch (SelectionMode)
             {
-                case MapSelectionMode.Entity: AddEntity(); break;
-                case MapSelectionMode.CarGenerator: AddCarGen(); break;
-                case MapSelectionMode.Path: AddPathNode(); break;
-                case MapSelectionMode.NavMesh: AddNavPoly(); break;//how to add points/portals? project window
-                case MapSelectionMode.TrainTrack: AddTrainNode(); break;
-                case MapSelectionMode.Scenario: AddScenarioNode(); break; //how to add different node types? project window
-                case MapSelectionMode.Audio: AddAudioZone(); break; //how to add emitters as well? project window
+                case MapSelectionMode.Entity: ProjectForm.NewEntity(); break;
+                case MapSelectionMode.CarGenerator: ProjectForm.NewCarGen(); break;
+                case MapSelectionMode.Path: ProjectForm.NewPathNode(); break;
+                case MapSelectionMode.NavMesh: ProjectForm.NewNavPoly(); break; //.NewNavPoint/.NewNavPortal//how to add points/portals? project window
+                case MapSelectionMode.TrainTrack: ProjectForm.NewTrainNode(); break;
+                case MapSelectionMode.Scenario: ProjectForm.NewScenarioNode(); break; //how to add different node types? project window
+                case MapSelectionMode.Audio: ProjectForm.NewAudioZone(); break; //.NewAudioEmitter // how to add emitters as well? project window
+            }
+        }
+        private void CopyItem()
+        {
+            CopiedItem = SelectedItem;
+            ToolbarPasteButton.Enabled = CopiedItem.CanCopyPaste && (ProjectForm != null); //ToolbarAddItemButton.Enabled;
+        }
+        private void PasteItem()
+        {
+            if ((ProjectForm != null) && CopiedItem.CanCopyPaste)
+            {
+                SelectItems(ProjectForm.NewObject(CopiedItem, (CopiedItem.MultipleSelectionItems != null)));
+            }
+        }
+        private void CloneItem()
+        {
+            if ((ProjectForm != null) && SelectedItem.CanCopyPaste)
+            {
+                SelectItems(ProjectForm.NewObject(SelectedItem, true));
             }
         }
         private void DeleteItem()
         {
-            if (SelectedItem.EntityDef != null) DeleteEntity();
-            else if (SelectedItem.CarGenerator != null) DeleteCarGen();
-            else if (SelectedItem.PathNode != null) DeletePathNode();
-            else if (SelectedItem.NavPoly != null) DeleteNavPoly();
-            else if (SelectedItem.NavPoint != null) DeleteNavPoint();
-            else if (SelectedItem.NavPortal != null) DeleteNavPortal();
-            else if (SelectedItem.TrainTrackNode != null) DeleteTrainNode();
-            else if (SelectedItem.ScenarioNode != null) DeleteScenarioNode();
-            else if (SelectedItem.Audio?.AudioZone != null) DeleteAudioZone();
-            else if (SelectedItem.Audio?.AudioEmitter != null) DeleteAudioEmitter();
+            if (ProjectForm != null)
+            {
+                ProjectForm.DeleteObject(SelectedItem);
+                SelectItem(null);
+            }
+            else
+            {
+                DeleteItem(ref SelectedItem);
+                SelectItem(null);
+            }
         }
-        private void CopyItem()
+        private void DeleteItem(ref MapSelection item)
         {
-            if (SelectedItem.EntityDef != null) CopyEntity();
-            else if (SelectedItem.CarGenerator != null) CopyCarGen();
-            else if (SelectedItem.PathNode != null) CopyPathNode();
-            else if (SelectedItem.NavPoly != null) CopyNavPoly();
-            else if (SelectedItem.NavPoint != null) CopyNavPoint();
-            else if (SelectedItem.NavPortal != null) CopyNavPortal();
-            else if (SelectedItem.TrainTrackNode != null) CopyTrainNode();
-            else if (SelectedItem.ScenarioNode != null) CopyScenarioNode();
-            else if (SelectedItem.Audio?.AudioZone != null) CopyAudioZone();
-            else if (SelectedItem.Audio?.AudioEmitter != null) CopyAudioEmitter();
+            if (item.MultipleSelectionItems != null)
+            {
+                for (int i = 0; i < item.MultipleSelectionItems.Length; i++)
+                {
+                    DeleteItem(ref item.MultipleSelectionItems[i]);
+                }
+            }
+            else if (item.EntityDef != null) DeleteEntity(item.EntityDef);
+            else if (item.CarGenerator != null) DeleteCarGen(item.CarGenerator);
+            else if (item.PathNode != null) DeletePathNode(item.PathNode);
+            else if (item.NavPoly != null) DeleteNavPoly(item.NavPoly);
+            else if (item.NavPoint != null) DeleteNavPoint(item.NavPoint);
+            else if (item.NavPortal != null) DeleteNavPortal(item.NavPortal);
+            else if (item.TrainTrackNode != null) DeleteTrainNode(item.TrainTrackNode);
+            else if (item.ScenarioNode != null) DeleteScenarioNode(item.ScenarioNode);
+            else if (item.Audio?.AudioZone != null) DeleteAudioZone(item.Audio);
+            else if (item.Audio?.AudioEmitter != null) DeleteAudioEmitter(item.Audio);
+            else if (item.CollisionVertex != null) DeleteCollisionVertex(item.CollisionVertex);
+            else if (item.CollisionPoly != null) DeleteCollisionPoly(item.CollisionPoly);
+            else if (item.CollisionBounds != null) DeleteCollisionBounds(item.CollisionBounds);
         }
-        private void PasteItem()
+        private void DeleteEntity(YmapEntityDef ent)
         {
-            if (CopiedEntity != null) PasteEntity();
-            else if (CopiedCarGen != null) PasteCarGen();
-            else if (CopiedPathNode != null) PastePathNode();
-            else if (CopiedNavPoly != null) PasteNavPoly();
-            else if (CopiedNavPoint != null) PasteNavPoint();
-            else if (CopiedNavPortal != null) PasteNavPortal();
-            else if (CopiedTrainNode != null) PasteTrainNode();
-            else if (CopiedScenarioNode != null) PasteScenarioNode();
-            else if (CopiedAudio?.AudioZone != null) PasteAudioZone();
-            else if (CopiedAudio?.AudioEmitter != null) PasteAudioEmitter();
-        }
-        private void CloneItem()
-        {
-            if (SelectedItem.EntityDef != null) CloneEntity();
-            else if (SelectedItem.CarGenerator != null) CloneCarGen();
-            else if (SelectedItem.PathNode != null) ClonePathNode();
-            else if (SelectedItem.NavPoly != null) CloneNavPoly();
-            else if (SelectedItem.NavPoint != null) CloneNavPoint();
-            else if (SelectedItem.NavPortal != null) CloneNavPortal();
-            else if (SelectedItem.TrainTrackNode != null) CloneTrainNode();
-            else if (SelectedItem.ScenarioNode != null) CloneScenarioNode();
-            else if (SelectedItem.Audio?.AudioZone != null) CloneAudioZone();
-            else if (SelectedItem.Audio?.AudioEmitter != null) CloneAudioEmitter();
-        }
-
-        private void AddEntity()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewEntity();
-        }
-        private void DeleteEntity()
-        {
-            var ent = SelectedItem.EntityDef;
             if (ent == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentEntity(ent)))
+            //project not open, or entity not selected there, just remove the entity from the ymap/mlo...
+            var ymap = ent.Ymap;
+            var instance = ent.MloParent?.MloInstance;
+            if (ymap == null)
             {
-                if (!ProjectForm.DeleteEntity())
+                if (instance != null)
                 {
-                    //MessageBox.Show("Unable to delete this entity from the current project. Make sure the entity's ymap exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
-            }
-            else
-            {
-                //project not open, or entity not selected there, just remove the entity from the ymap/nlo...
-                var ymap = ent.Ymap;
-                var instance = ent.MloParent?.MloInstance;
-                if (ymap == null)
-                {
-                    if (instance != null)
+                    try
                     {
-                        try
+                        if (!instance.DeleteEntity(ent))
                         {
-                            if (!instance.DeleteEntity(ent))
-                            {
-                                SelectItem(null);
-                            }
-                        }
-                        catch (Exception e) // various failures can happen here.
-                        {
-                            MessageBox.Show("Unable to remove entity..." + Environment.NewLine + e.Message);
+                            SelectItem(null);
                         }
                     }
-                }
-                else if (!ymap.RemoveEntity(ent))
-                {
-                    MessageBox.Show("Unable to remove entity.");
-                }
-                else
-                {
-                    SelectItem(null);
+                    catch (Exception e) // various failures can happen here.
+                    {
+                        MessageBox.Show("Unable to remove entity..." + Environment.NewLine + e.Message);
+                    }
                 }
             }
-        }
-        private void CopyEntity()
-        {
-            CopiedEntity = SelectedItem.EntityDef;
-            ToolbarPasteButton.Enabled = (CopiedEntity != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteEntity()
-        {
-            if (CopiedEntity == null) return;
-            if (ProjectForm == null) return;
-            MloInstanceData instance = CopiedEntity.MloParent?.MloInstance;
-            MCEntityDef entdef = instance?.TryGetArchetypeEntity(CopiedEntity);
-            if (entdef != null)
+            else if (!ymap.RemoveEntity(ent))
             {
-                ProjectForm.NewMloEntity(CopiedEntity, true);
+                MessageBox.Show("Unable to remove entity.");
             }
             else
             {
-                ProjectForm.NewEntity(CopiedEntity, true);
+                SelectItem(null);
             }
         }
-        private void CloneEntity()
+        private void DeleteCarGen(YmapCarGen cargen)
         {
-            if (SelectedItem.EntityDef == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewEntity(SelectedItem.EntityDef, true);
-        }
-
-        private void AddCarGen()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewCarGen();
-        }
-        private void DeleteCarGen()
-        {
-            var cargen = SelectedItem.CarGenerator;
             if (cargen == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentCarGen(cargen)))
+            //project not open, or cargen not selected there, just remove the cargen from the ymap...
+            var ymap = cargen.Ymap;
+            if (!ymap.RemoveCarGen(cargen))
             {
-                if (!ProjectForm.DeleteCarGen())
-                {
-                    //MessageBox.Show("Unable to delete this car generator from the current project. Make sure the car generator's ymap exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove car generator.");
             }
             else
             {
-                //project not open, or cargen not selected there, just remove the cargen from the ymap...
-                var ymap = cargen.Ymap;
-                if (!ymap.RemoveCarGen(cargen))
-                {
-                    MessageBox.Show("Unable to remove car generator.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                SelectItem(null);
             }
         }
-        private void CopyCarGen()
+        private void DeletePathNode(YndNode pathnode)
         {
-            CopiedCarGen = SelectedItem.CarGenerator;
-            ToolbarPasteButton.Enabled = (CopiedCarGen != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteCarGen()
-        {
-            if (CopiedCarGen == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewCarGen(CopiedCarGen);
-        }
-        private void CloneCarGen()
-        {
-            if (SelectedItem.CarGenerator == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewCarGen(SelectedItem.CarGenerator, true);
-        }
-
-        private void AddPathNode()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewPathNode();
-        }
-        private void DeletePathNode()
-        {
-            var pathnode = SelectedItem.PathNode;
             if (pathnode == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentPathNode(pathnode)))
+            //project not open, or cargen not selected there, just remove the cargen from the ymap...
+            var ynd = pathnode.Ynd;
+            if (!ynd.RemoveNode(pathnode))
             {
-                if (!ProjectForm.DeletePathNode())
-                {
-                    //MessageBox.Show("Unable to delete this path node from the current project. Make sure the path node's ynd exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove path node.");
             }
             else
             {
-                //project not open, or cargen not selected there, just remove the cargen from the ymap...
-                var ynd = pathnode.Ynd;
-                if (!ynd.RemoveNode(pathnode))
-                {
-                    MessageBox.Show("Unable to remove path node.");
-                }
-                else
-                {
-                    UpdatePathNodeGraphics(pathnode, false);
-                    SelectItem(null);
-                }
+                UpdatePathNodeGraphics(pathnode, false);
+                SelectItem(null);
             }
         }
-        private void CopyPathNode()
+        private void DeleteNavPoly(YnvPoly navpoly)
         {
-            CopiedPathNode = SelectedItem.PathNode;
-            ToolbarPasteButton.Enabled = (CopiedPathNode != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PastePathNode()
-        {
-            if (CopiedPathNode == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewPathNode(CopiedPathNode);
-        }
-        private void ClonePathNode()
-        {
-            if (SelectedItem.PathNode == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewPathNode(SelectedItem.PathNode, true);
-        }
-
-        private void AddNavPoly()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPoly();
-        }
-        private void DeleteNavPoly()
-        {
-            var navpoly = SelectedItem.NavPoly;
             if (navpoly == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentNavPoly(navpoly)))
+            //project not open, or nav poly not selected there, just remove the poly from the ynv...
+            var ynv = navpoly.Ynv;
+            if (!ynv.RemovePoly(navpoly))
             {
-                if (!ProjectForm.DeleteNavPoly())
-                {
-                    //MessageBox.Show("Unable to delete this nav poly from the current project. Make sure the nav poly's ynv exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove nav poly. NavMesh editing TODO!");
             }
             else
             {
-                //project not open, or nav poly not selected there, just remove the poly from the ynv...
-                var ynv = navpoly.Ynv;
-                if (!ynv.RemovePoly(navpoly))
-                {
-                    MessageBox.Show("Unable to remove nav poly. NavMesh editing TODO!");
-                }
-                else
-                {
-                    UpdateNavPolyGraphics(navpoly, false);
-                    SelectItem(null);
-                }
+                UpdateNavPolyGraphics(navpoly, false);
+                SelectItem(null);
             }
         }
-        private void CopyNavPoly()
+        private void DeleteNavPoint(YnvPoint navpoint)
         {
-            CopiedNavPoly = SelectedItem.NavPoly;
-            ToolbarPasteButton.Enabled = (CopiedNavPoly != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteNavPoly()
-        {
-            if (CopiedNavPoly == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPoly(CopiedNavPoly);
-        }
-        private void CloneNavPoly()
-        {
-            if (SelectedItem.NavPoly == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPoly(SelectedItem.NavPoly, true);
-        }
-
-        private void AddNavPoint()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPoint();
-        }
-        private void DeleteNavPoint()
-        {
-            var navpoint = SelectedItem.NavPoint;
             if (navpoint == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentNavPoint(navpoint)))
+            //project not open, or nav point not selected there, just remove the point from the ynv...
+            var ynv = navpoint.Ynv;
+            if (!ynv.RemovePoint(navpoint))
             {
-                if (!ProjectForm.DeleteNavPoint())
-                {
-                    //MessageBox.Show("Unable to delete this nav point from the current project. Make sure the nav point's ynv exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove nav point. NavMesh editing TODO!");
             }
             else
             {
-                //project not open, or nav point not selected there, just remove the point from the ynv...
-                var ynv = navpoint.Ynv;
-                if (!ynv.RemovePoint(navpoint))
-                {
-                    MessageBox.Show("Unable to remove nav point. NavMesh editing TODO!");
-                }
-                else
-                {
-                    UpdateNavPointGraphics(navpoint, false);
-                    SelectItem(null);
-                }
+                UpdateNavPointGraphics(navpoint, false);
+                SelectItem(null);
             }
         }
-        private void CopyNavPoint()
+        private void DeleteNavPortal(YnvPortal navportal)
         {
-            CopiedNavPoint = SelectedItem.NavPoint;
-            ToolbarPasteButton.Enabled = (CopiedNavPoint != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteNavPoint()
-        {
-            if (CopiedNavPoint == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPoint(CopiedNavPoint);
-        }
-        private void CloneNavPoint()
-        {
-            if (SelectedItem.NavPoint == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPoint(SelectedItem.NavPoint, true);
-        }
-
-        private void AddNavPortal()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPortal();
-        }
-        private void DeleteNavPortal()
-        {
-            var navportal = SelectedItem.NavPortal;
             if (navportal == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentNavPortal(navportal)))
+            //project not open, or nav portal not selected there, just remove the portal from the ynv...
+            var ynv = navportal.Ynv;
+            if (!ynv.RemovePortal(navportal))
             {
-                if (!ProjectForm.DeleteNavPortal())
-                {
-                    //MessageBox.Show("Unable to delete this nav portal from the current project. Make sure the nav portal's ynv exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove nav portal. NavMesh editing TODO!");
             }
             else
             {
-                //project not open, or nav portal not selected there, just remove the portal from the ynv...
-                var ynv = navportal.Ynv;
-                if (!ynv.RemovePortal(navportal))
-                {
-                    MessageBox.Show("Unable to remove nav portal. NavMesh editing TODO!");
-                }
-                else
-                {
-                    UpdateNavPortalGraphics(navportal, false);
-                    SelectItem(null);
-                }
+                UpdateNavPortalGraphics(navportal, false);
+                SelectItem(null);
             }
         }
-        private void CopyNavPortal()
+        private void DeleteTrainNode(TrainTrackNode trainnode)
         {
-            CopiedNavPortal = SelectedItem.NavPortal;
-            ToolbarPasteButton.Enabled = (CopiedNavPortal != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteNavPortal()
-        {
-            if (CopiedNavPortal == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPortal(CopiedNavPortal);
-        }
-        private void CloneNavPortal()
-        {
-            if (SelectedItem.NavPortal == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewNavPortal(SelectedItem.NavPortal, true);
-        }
-
-        private void AddTrainNode()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewTrainNode();
-        }
-        private void DeleteTrainNode()
-        {
-            var trainnode = SelectedItem.TrainTrackNode;
             if (trainnode == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentTrainNode(trainnode)))
+            //project not open, or train node not selected there, just remove the node from the train track...
+            var track = trainnode.Track;
+            if (!track.RemoveNode(trainnode))
             {
-                if (!ProjectForm.DeleteTrainNode())
-                {
-                    //MessageBox.Show("Unable to delete this train track node from the current project. Make sure the path train track file exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove train track node.");
             }
             else
             {
-                //project not open, or train node not selected there, just remove the node from the train track...
-                var track = trainnode.Track;
-                if (!track.RemoveNode(trainnode))
-                {
-                    MessageBox.Show("Unable to remove train track node.");
-                }
-                else
-                {
-                    UpdateTrainTrackNodeGraphics(trainnode, false);
-                    SelectItem(null);
-                }
+                UpdateTrainTrackNodeGraphics(trainnode, false);
+                SelectItem(null);
             }
         }
-        private void CopyTrainNode()
+        private void DeleteScenarioNode(ScenarioNode scenariopt)
         {
-            CopiedTrainNode = SelectedItem.TrainTrackNode;
-            ToolbarPasteButton.Enabled = (CopiedTrainNode != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteTrainNode()
-        {
-            if (CopiedTrainNode == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewTrainNode(CopiedTrainNode);
-        }
-        private void CloneTrainNode()
-        {
-            if (SelectedItem.TrainTrackNode == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewTrainNode(SelectedItem.TrainTrackNode, true);
-        }
-
-        private void AddScenarioNode()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewScenarioNode();
-        }
-        private void DeleteScenarioNode()
-        {
-            var scenariopt = SelectedItem.ScenarioNode;
             if (scenariopt == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentScenarioNode(scenariopt)))
+            //project not open, or scenario point not selected there, just remove the point from the region...
+            var region = scenariopt.Region.Ymt.ScenarioRegion;
+            if (!region.RemoveNode(scenariopt))
             {
-                if (!ProjectForm.DeleteScenarioNode())
-                {
-                    //MessageBox.Show("Unable to delete this scenario point from the current project. Make sure the scenario file exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove scenario point.");
             }
             else
             {
-                //project not open, or scenario point not selected there, just remove the point from the region...
-                var region = scenariopt.Region.Ymt.ScenarioRegion;
-                if (!region.RemoveNode(scenariopt))
-                {
-                    MessageBox.Show("Unable to remove scenario point.");
-                }
-                else
-                {
-                    UpdateScenarioGraphics(scenariopt.Ymt, false);
-                    SelectItem(null);
-                }
+                UpdateScenarioGraphics(scenariopt.Ymt, false);
+                SelectItem(null);
             }
         }
-        private void CopyScenarioNode()
+        private void DeleteAudioZone(AudioPlacement audio)
         {
-            CopiedScenarioNode = SelectedItem.ScenarioNode;
-            ToolbarPasteButton.Enabled = (CopiedScenarioNode != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteScenarioNode()
-        {
-            if (CopiedScenarioNode == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewScenarioNode(CopiedScenarioNode);
-        }
-        private void CloneScenarioNode()
-        {
-            if (SelectedItem.ScenarioNode == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewScenarioNode(SelectedItem.ScenarioNode, true);
-        }
-
-        private void AddAudioZone()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewAudioZone();
-        }
-        private void DeleteAudioZone()
-        {
-            var audio = SelectedItem.Audio;
             if (audio == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentAudioZone(audio)))
+            //project not open, or zone not selected there, just remove the zone from the rel...
+            var rel = audio.RelFile;
+            if (!rel.RemoveRelData(audio.AudioZone))
             {
-                if (!ProjectForm.DeleteAudioZone())
-                {
-                    //MessageBox.Show("Unable to delete this audio zone from the current project. Make sure the zone's .rel file exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove audio zone. Audio zone editing TODO!");
             }
             else
             {
-                //project not open, or zone not selected there, just remove the zone from the rel...
-                var rel = audio.RelFile;
-                if (!rel.RemoveRelData(audio.AudioZone))
-                {
-                    MessageBox.Show("Unable to remove audio zone. Audio zone editing TODO!");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                SelectItem(null);
             }
         }
-        private void CopyAudioZone()
+        private void DeleteAudioEmitter(AudioPlacement audio)
         {
-            CopiedAudio = SelectedItem.Audio;
-            ToolbarPasteButton.Enabled = (CopiedAudio != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteAudioZone()
-        {
-            if (CopiedAudio == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewAudioZone(CopiedAudio);
-        }
-        private void CloneAudioZone()
-        {
-            if (SelectedItem.Audio == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewAudioZone(SelectedItem.Audio, true);
-        }
-
-        private void AddAudioEmitter()
-        {
-            if (ProjectForm == null) return;
-            ProjectForm.NewAudioEmitter();
-        }
-        private void DeleteAudioEmitter()
-        {
-            var audio = SelectedItem.Audio;
             if (audio == null) return;
 
-            if ((ProjectForm != null) && (ProjectForm.IsCurrentAudioEmitter(audio)))
+            //project not open, or zone not selected there, just remove the zone from the rel...
+            var rel = audio.RelFile;
+            if (!rel.RemoveRelData(audio.AudioEmitter))
             {
-                if (!ProjectForm.DeleteAudioEmitter())
-                {
-                    //MessageBox.Show("Unable to delete this audio emitter from the current project. Make sure the emitter's .rel file exists in the current project.");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                MessageBox.Show("Unable to remove audio emitter. Audio zone editing TODO!");
             }
             else
             {
-                //project not open, or zone not selected there, just remove the zone from the rel...
-                var rel = audio.RelFile;
-                if (!rel.RemoveRelData(audio.AudioEmitter))
-                {
-                    MessageBox.Show("Unable to remove audio emitter. Audio zone editing TODO!");
-                }
-                else
-                {
-                    SelectItem(null);
-                }
+                SelectItem(null);
             }
         }
-        private void CopyAudioEmitter()
+        private void DeleteCollisionVertex(BoundVertex vertex)
         {
-            CopiedAudio = SelectedItem.Audio;
-            ToolbarPasteButton.Enabled = (CopiedAudio != null) && ToolbarAddItemButton.Enabled;
-        }
-        private void PasteAudioEmitter()
-        {
-            if (CopiedAudio == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewAudioEmitter(CopiedAudio);
-        }
-        private void CloneAudioEmitter()
-        {
-            if (SelectedItem.Audio == null) return;
-            if (ProjectForm == null) return;
-            ProjectForm.NewAudioEmitter(SelectedItem.Audio, true);
-        }
+            if (vertex == null) return;
 
+            //project not open, or vertex not selected there, just remove the vertex from the geometry...
+            var bgeom = vertex.Owner;
+            if ((bgeom == null) || (!bgeom.DeleteVertex(vertex.Index)))
+            {
+                MessageBox.Show("Unable to remove vertex.");
+            }
+            else
+            {
+                UpdateCollisionBoundsGraphics(bgeom);
+                SelectItem(null);
+            }
+        }
+        private void DeleteCollisionPoly(BoundPolygon poly)
+        {
+            if (poly == null) return;
+
+            //project not open, or polygon not selected there, just remove the vertex from the geometry...
+            var bgeom = poly.Owner;
+            if ((bgeom == null) || (!bgeom.DeletePolygon(poly)))
+            {
+                MessageBox.Show("Unable to remove polygon.");
+            }
+            else
+            {
+                UpdateCollisionBoundsGraphics(bgeom);
+                SelectItem(null);
+            }
+        }
+        private void DeleteCollisionBounds(Bounds bounds)
+        {
+            if (bounds == null) return;
+
+            var parent = bounds.Parent;
+            if (parent != null)
+            {
+                parent.DeleteChild(bounds);
+                UpdateCollisionBoundsGraphics(parent);
+            }
+            else
+            {
+                var ybn = bounds.GetRootYbn();
+                ybn.RemoveBounds(bounds);
+            }
+
+            SelectItem(null);
+        }
 
 
         private void SetMouseSelect(bool enable)
@@ -6068,6 +5721,35 @@ namespace CodeWalker
             ToolbarPanel.Visible = !ToolbarPanel.Visible;
             ShowToolbarCheckBox.Checked = ToolbarPanel.Visible;
         }
+
+
+
+
+        public void ShowSubtitle(string text, float duration)
+        {
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => { ShowSubtitle(text, duration); }));
+                }
+                catch { }
+                return;
+            }
+
+            SubtitleLabel.Text = text;
+            SubtitleLabel.Visible = true;
+            SubtitleTimer.Interval = (int)(duration * 1000.0f);
+            SubtitleTimer.Enabled = true;
+
+        }
+
+
+
+
+
+
+
 
 
         private void StatsUpdateTimer_Tick(object sender, EventArgs e)
@@ -6649,6 +6331,18 @@ namespace CodeWalker
             Renderer.renderhdtextures = HDTexturesCheckBox.Checked;
         }
 
+        private void NearClipUpDown_ValueChanged(object sender, EventArgs e)
+        {
+            camera.ZNear = (float)NearClipUpDown.Value;
+            camera.UpdateProj = true;
+        }
+
+        private void FarClipUpDown_ValueChanged(object sender, EventArgs e)
+        {
+            camera.ZFar = (float)FarClipUpDown.Value;
+            camera.UpdateProj = true;
+        }
+
         private void PathsCheckBox_CheckedChanged(object sender, EventArgs e)
         {
             renderpaths = PathsCheckBox.Checked;
@@ -6972,6 +6666,11 @@ namespace CodeWalker
             ShowProjectForm();
         }
 
+        private void ToolsMenuCutsceneViewer_Click(object sender, EventArgs e)
+        {
+            ShowCutsceneForm();
+        }
+
         private void ToolsMenuWorldSearch_Click(object sender, EventArgs e)
         {
             ShowSearchForm();
@@ -7079,9 +6778,9 @@ namespace CodeWalker
 
         private void TextureSamplerComboBox_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (TextureSamplerComboBox.SelectedItem is MetaName)
+            if (TextureSamplerComboBox.SelectedItem is ShaderParamNames)
             {
-                Renderer.shaders.RenderTextureSampler = (MetaName)TextureSamplerComboBox.SelectedItem;
+                Renderer.shaders.RenderTextureSampler = (ShaderParamNames)TextureSamplerComboBox.SelectedItem;
             }
         }
 
@@ -7155,6 +6854,14 @@ namespace CodeWalker
         private void ShowYmapChildrenCheckBox_CheckedChanged(object sender, EventArgs e)
         {
             Renderer.renderchildents = ShowYmapChildrenCheckBox.Checked;
+        }
+
+        private void DeferredShadingCheckBox_CheckedChanged(object sender, EventArgs e)
+        {
+            lock (Renderer.RenderSyncRoot)
+            {
+                Renderer.shaders.deferred = DeferredShadingCheckBox.Checked;
+            }
         }
 
         private void HDRRenderingCheckBox_CheckedChanged(object sender, EventArgs e)
@@ -7293,9 +7000,10 @@ namespace CodeWalker
             //Monitor.Exit(rendersyncroot);
         }
 
-        private void DistantLODLightsCheckBox_CheckedChanged(object sender, EventArgs e)
+        private void LODLightsCheckBox_CheckedChanged(object sender, EventArgs e)
         {
-            Renderer.renderdistlodlights = DistantLODLightsCheckBox.Checked;
+            Renderer.renderdistlodlights = LODLightsCheckBox.Checked;
+            Renderer.renderlodlights = LODLightsCheckBox.Checked;
         }
 
         private void NaturalAmbientLightCheckBox_CheckedChanged(object sender, EventArgs e)
@@ -7429,6 +7137,16 @@ namespace CodeWalker
             NewYmap();
         }
 
+        private void ToolbarNewYtypButton_Click(object sender, EventArgs e)
+        {
+            NewYtyp();
+        }
+
+        private void ToolbarNewYbnButton_Click(object sender, EventArgs e)
+        {
+            NewYbn();
+        }
+
         private void ToolbarNewYndButton_Click(object sender, EventArgs e)
         {
             NewYnd();
@@ -7457,6 +7175,16 @@ namespace CodeWalker
         private void ToolbarOpenYmapButton_Click(object sender, EventArgs e)
         {
             OpenYmap();
+        }
+
+        private void ToolbarOpenYtypButton_Click(object sender, EventArgs e)
+        {
+            OpenYtyp();
+        }
+
+        private void ToolbarOpenYbnButton_Click(object sender, EventArgs e)
+        {
+            OpenYbn();
         }
 
         private void ToolbarOpenYndButton_Click(object sender, EventArgs e)
@@ -7822,6 +7550,14 @@ namespace CodeWalker
             SnapGridSize = (float)SnapGridSizeUpDown.Value;
         }
 
+        private void SnapAngleUpDown_ValueChanged(object sender, EventArgs e)
+        {
+            if (Widget != null)
+            {
+                Widget.SnapAngleDegrees = (float)SnapAngleUpDown.Value;
+            }
+        }
+
         private void RenderEntitiesCheckBox_CheckedChanged(object sender, EventArgs e)
         {
             Renderer.renderentities = RenderEntitiesCheckBox.Checked;
@@ -7831,6 +7567,17 @@ namespace CodeWalker
         {
             var statsForm = new StatisticsForm(this);
             statsForm.Show(this);
+        }
+
+        private void SubtitleLabel_SizeChanged(object sender, EventArgs e)
+        {
+            SubtitleLabel.Left = (ClientSize.Width - SubtitleLabel.Size.Width) / 2; //keep subtitle label centered
+        }
+
+        private void SubtitleTimer_Tick(object sender, EventArgs e)
+        {
+            SubtitleTimer.Enabled = false;
+            SubtitleLabel.Visible = false;
         }
     }
 

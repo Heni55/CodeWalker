@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -7,9 +8,15 @@ using System.Threading.Tasks;
 
 namespace CodeWalker.GameFiles
 {
+    [TypeConverter(typeof(ExpandableObjectConverter))]
     public class YbnFile : GameFile, PackedFile
     {
         public Bounds Bounds { get; set; }
+
+
+        //used by the editor:
+        public bool HasChanged { get; set; } = false;
+
 
         public YbnFile() : base(null, GameFileType.Ybn)
         {
@@ -18,6 +25,14 @@ namespace CodeWalker.GameFiles
         {
         }
 
+        public void Load(byte[] data)
+        {
+            //direct load from a raw, compressed ybn file
+
+            RpfFile.LoadResourceFile(this, data, 43);
+
+            Loaded = true;
+        }
 
         public void Load(byte[] data, RpfFileEntry entry)
         {
@@ -36,6 +51,7 @@ namespace CodeWalker.GameFiles
 
             Bounds = rd.ReadBlock<Bounds>();
 
+            Bounds.OwnerYbn = this;
             Bounds.OwnerName = entry.Name;
 
             Loaded = true;
@@ -46,6 +62,19 @@ namespace CodeWalker.GameFiles
             byte[] data = ResourceBuilder.Build(Bounds, 43); //ybn is type/version 43...
 
             return data;
+        }
+
+
+
+
+        public bool RemoveBounds(Bounds b)
+        {
+            if (Bounds == b)
+            {
+                Bounds = null;
+                return true;
+            }
+            return false;
         }
 
     }
